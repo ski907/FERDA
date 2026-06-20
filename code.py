@@ -104,8 +104,10 @@ class SimpleServer:
             time.sleep(0.05)
 
     def _respond(self, conn, body, content_type="application/json"):
-        header = "HTTP/1.1 200 OK\r\nContent-Type: " + content_type + "\r\nContent-Length: " + str(len(body)) + "\r\n\r\n"
-        self._send(conn, (header + body).encode())
+        body_bytes = body.encode("utf-8") if isinstance(body, str) else body
+        header = ("HTTP/1.1 200 OK\r\nContent-Type: " + content_type +
+                  "\r\nContent-Length: " + str(len(body_bytes)) + "\r\n\r\n").encode()
+        self._send(conn, header + body_bytes)
 
     def _serve_file(self, conn, filename, content_type):
         try:
