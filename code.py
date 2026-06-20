@@ -104,11 +104,7 @@ class SimpleServer:
             time.sleep(0.05)
 
     def _respond(self, conn, body, content_type="application/json"):
-        header = (
-            f"HTTP/1.1 200 OK\r\n"
-            f"Content-Type: {content_type}\r\n"
-            f"Content-Length: {len(body)}\r\n\r\n"
-        )
+        header = "HTTP/1.1 200 OK\r\nContent-Type: " + content_type + "\r\nContent-Length: " + str(len(body)) + "\r\n\r\n"
         self._send(conn, (header + body).encode())
 
     def _serve_file(self, conn, filename, content_type):
@@ -150,7 +146,7 @@ class SimpleServer:
                 wifi_changed = True
 
         save_settings(self.settings)
-        msg = "saved — power cycle to apply WiFi changes" if wifi_changed else "saved"
+        msg = "saved -- power cycle to apply WiFi changes" if wifi_changed else "saved"
         self._respond(conn, json.dumps({"status": msg}))
 
     def _handle_calibrate(self, conn, params):
@@ -234,8 +230,8 @@ class SimpleServer:
 
     def run(self):
         print("Server running!")
-        print(f"WiFi: {self.settings['wifi_ssid']}")
-        print(f"URL: http://ferda.local or http://{wifi.radio.ipv4_address_ap}")
+        print("WiFi: " + self.settings["wifi_ssid"])
+        print("URL: http://ferda.local or http://" + str(wifi.radio.ipv4_address_ap))
 
         while True:
             self.log_periodically()
