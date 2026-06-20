@@ -3,139 +3,258 @@ import socketpool
 import mdns
 import time
 import os
-import logger  # Import the logger module
+import json
+import errno
+import logger
 
-# Initialize the log file
-logger.initialize_log_file()
+SETTINGS_FILE = "/settings.json"
+
+DEFAULT_SETTINGS = {
+    "wifi_ssid": "FERDA_AP",
+    "wifi_password": "strong_password",
+    "sensor_to_flange_mm": 100,
+    "cap_distance_mm": 30,
+    "range_offset_mm": 0,
+    "ice_thickness_cm": 0,
+    "expected_freeboard_mm": 0,
+    "alarm_threshold_mm": 20,
+    "log_interval_sec": 5,
+}
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            s = json.load(f)
+        for k, v in DEFAULT_SETTINGS.items():
+            if k not in s:
+                s[k] = v
+        return s
+    except OSError:
+        return dict(DEFAULT_SETTINGS)
+
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f)
+
+
+def url_decode(s):
+    result = []
+    i = 0
+    while i < len(s):
+        if s[i] == "%" and i + 2 < len(s):
+            try:
+                result.append(chr(int(s[i + 1:i + 3], 16)))
+                i += 3
+                continue
+            except ValueError:
+                pass
+        if s[i] == "+":
+            result.append(" ")
+        else:
+            result.append(s[i])
+        i += 1
+    return "".join(result)
+
+
+def parse_request(request_str):
+    """Return (method, path, params_dict) from a raw HTTP request string."""
+    try:
+        first_line = request_str.split("\r\n")[0]
+        parts = first_line.split(" ")
+        method = parts[0]
+        path_qs = parts[1] if len(parts) > 1 else "/"
+    except Exception:
+        return "GET", "/", {}
+
+    if "?" in path_qs:
+        path, qs = path_qs.split("?", 1)
+    else:
+        path, qs = path_qs, ""
+
+    params = {}
+    for pair in qs.split("&"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            params[url_decode(k)] = url_decode(v)
+
+    return method, path, params
+
 
 class SimpleServer:
-    def __init__(self):
-        wifi.radio.start_ap(WIFI_SSID, password=WIFI_PASSWORD)
+    def __init__(self, settings):
+        self.settings = settings
+        wifi.radio.start_ap(settings["wifi_ssid"], password=settings["wifi_password"])
         self.mdns_server = mdns.Server(wifi.radio)
         self.mdns_server.hostname = "ferda"
-        self.mdns_server.advertise_service(service_type="_http", protocol="_tcp", port=HTTP_PORT)
-        
+        self.mdns_server.advertise_service(service_type="_http", protocol="_tcp", port=80)
+
         self.pool = socketpool.SocketPool(wifi.radio)
         self.server = self.pool.socket()
-        self.server.bind(('0.0.0.0', HTTP_PORT))
+        self.server.bind(("0.0.0.0", 80))
         self.server.listen(1)
-        
-        # Set the server socket to non-blocking mode
         self.server.setblocking(False)
-        
-        self.last_log_time = time.monotonic()  # Start time for logging
+        self.last_log_time = time.monotonic()
 
-    def send_response(self, conn, response):
+    def _send(self, conn, data):
         chunk_size = 512
-        for i in range(0, len(response), chunk_size):
-            conn.send(response[i:i + chunk_size])
-            time.sleep(0.05)  # Small delay between chunks to manage ESP32 limitations
+        for i in range(0, len(data), chunk_size):
+            conn.send(data[i:i + chunk_size])
+            time.sleep(0.05)
+
+    def _respond(self, conn, body, content_type="application/json"):
+        header = (
+            f"HTTP/1.1 200 OK\r\n"
+            f"Content-Type: {content_type}\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n"
+        )
+        self._send(conn, (header + body).encode())
+
+    def _serve_file(self, conn, filename, content_type):
+        try:
+            with open(filename, "r") as f:
+                content = f.read()
+            self._respond(conn, content, content_type)
+        except OSError:
+            self._send(conn, b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot found")
+
+    # --- Request handlers ---
+
+    def _handle_log_json(self, conn):
+        entries = logger.read_last_entries(60)
+        self._respond(conn, json.dumps(entries))
+
+    def _handle_latest(self, conn):
+        entries = logger.read_last_entries(1)
+        body = json.dumps(entries[0]) if entries else "{}"
+        self._respond(conn, body)
+
+    def _handle_config_get(self, conn):
+        self._respond(conn, json.dumps(self.settings))
+
+    def _handle_save_config(self, conn, params):
+        numeric_keys = ("sensor_to_flange_mm", "alarm_threshold_mm", "log_interval_sec", "cap_distance_mm")
+        for key in numeric_keys:
+            if key in params:
+                try:
+                    val = params[key]
+                    self.settings[key] = float(val) if "." in val else int(val)
+                except ValueError:
+                    pass
+
+        wifi_changed = False
+        for key in ("wifi_ssid", "wifi_password"):
+            if key in params and params[key] != self.settings.get(key):
+                self.settings[key] = params[key]
+                wifi_changed = True
+
+        save_settings(self.settings)
+        msg = "saved — power cycle to apply WiFi changes" if wifi_changed else "saved"
+        self._respond(conn, json.dumps({"status": msg}))
+
+    def _handle_calibrate(self, conn, params):
+        cap_mm = float(params.get("cap_mm", self.settings.get("cap_distance_mm", 30)))
+        raw = logger.measure_range()
+        offset = round(raw - cap_mm, 1)
+        self.settings["range_offset_mm"] = offset
+        self.settings["cap_distance_mm"] = cap_mm
+        save_settings(self.settings)
+        self._respond(conn, json.dumps({
+            "raw_range_mm": raw,
+            "cap_distance_mm": cap_mm,
+            "range_offset_mm": offset,
+            "status": "ok",
+        }))
+
+    def _handle_set_ice(self, conn, params):
+        if "ice_cm" not in params:
+            self._respond(conn, json.dumps({"error": "ice_cm required"}))
+            return
+        ice_cm = float(params["ice_cm"])
+        expected_mm = round(ice_cm * 10 * 0.083, 1)
+        self.settings["ice_thickness_cm"] = ice_cm
+        self.settings["expected_freeboard_mm"] = expected_mm
+        save_settings(self.settings)
+        self._respond(conn, json.dumps({
+            "ice_thickness_cm": ice_cm,
+            "expected_freeboard_mm": expected_mm,
+            "status": "ok",
+        }))
+
+    def _handle_verify(self, conn, params):
+        expected_mm = self.settings.get("expected_freeboard_mm", 0)
+        raw = logger.measure_range()
+        measured_mm = round(
+            raw - self.settings.get("range_offset_mm", 0) - self.settings.get("sensor_to_flange_mm", 0),
+            1
+        )
+        diff = round(measured_mm - expected_mm, 1)
+        pct = round(abs(diff) / expected_mm * 100, 1) if expected_mm > 0 else 0
+        self._respond(conn, json.dumps({
+            "expected_freeboard_mm": expected_mm,
+            "measured_freeboard_mm": measured_mm,
+            "difference_mm": diff,
+            "difference_pct": pct,
+            "status": "ok" if pct < 25 else "check_sensor",
+        }))
+
+    # --- Main loop ---
 
     def handle_request(self, conn, request_str):
-        if "GET /monitor.js" in request_str:
-            # Serve the JavaScript file from the filesystem
-            try:
-                with open("monitor.js", "r") as f:
-                    js_content = f.read()
-                js_response = f"HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {len(js_content)}\r\n\r\n{js_content}".encode()
-                self.send_response(conn, js_response)
-            except OSError:
-                # If the file is not found or can't be read
-                error_response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nFile not found".encode()
-                self.send_response(conn, error_response)
-        
-        elif "GET /log_data.json" in request_str:
-            # Serve the JSON file with logged data
-            try:
-                with open("log_data.json", "r") as f:
-                    json_content = f.read()
-                json_response = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(json_content)}\r\n\r\n{json_content}".encode()
-                self.send_response(conn, json_response)
-            except OSError:
-                error_response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\nFile not found".encode()
-                self.send_response(conn, error_response)
+        _, path, params = parse_request(request_str)
 
+        if path == "/monitor.js":
+            self._serve_file(conn, "monitor.js", "application/javascript")
+        elif path == "/log_data.json":
+            self._handle_log_json(conn)
+        elif path == "/latest.json":
+            self._handle_latest(conn)
+        elif path == "/config":
+            self._handle_config_get(conn)
+        elif path == "/save_config":
+            self._handle_save_config(conn, params)
+        elif path == "/calibrate":
+            self._handle_calibrate(conn, params)
+        elif path == "/set_ice":
+            self._handle_set_ice(conn, params)
+        elif path == "/verify":
+            self._handle_verify(conn, params)
         else:
-            # Serve the HTML content
-            html_content = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>FERDA Monitor</title>
-                <style>
-                    body { font-family: Arial; background: #f0f0f0; margin: 0; }
-                    .container { margin: 10px; padding: 10px; background: white; border-radius: 5px; }
-                    .value-box { display: flex; gap: 15px; margin-bottom: 20px; }
-                    .value-box div { font-size: 18px; }
-                    canvas { width: 100%; height: 200px; background: #fff; margin-bottom: 10px; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>FERDA Monitor</h1>
-
-                    <!-- Current value displays -->
-                    <div class="value-box">
-                        <div><strong>Range:</strong> <span id="currentRange">-- mm</span></div>
-                        <div><strong>Battery:</strong> <span id="currentBattery">-- V</span></div>
-                        <div><strong>Freeboard:</strong> <span id="currentFreeboard">-- mm</span></div>
-                    </div>
-
-                    <!-- Plot canvases -->
-                    <canvas id="rangeChart"></canvas>
-                    <canvas id="batteryChart"></canvas>
-                    <canvas id="freeboardChart"></canvas>
-                </div>
-
-                <!-- Link external JavaScript file -->
-                <script src="monitor.js"></script>
-            </body>
-            </html>
-            """
-            response = f"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {len(html_content)}\r\n\r\n{html_content}".encode()
-            self.send_response(conn, response)
+            self._serve_file(conn, "index.html", "text/html; charset=utf-8")
 
     def log_periodically(self):
-        # Log data every 5 seconds
         current_time = time.monotonic()
-        if current_time - self.last_log_time >= 5:
-            data = logger.collect_sensor_data()
-            print(data)  # Print the collected data for debugging
+        interval = self.settings.get("log_interval_sec", 5)
+        if current_time - self.last_log_time >= interval:
+            data = logger.collect_sensor_data(self.settings)
+            print(data)
             logger.log_data(data)
-            print(f"Data logged at {current_time:.2f} seconds since start")  # Print the time since start
-            self.last_log_time = current_time  # Reset the timer
+            self.last_log_time = current_time
 
     def run(self):
-        print("Server is running!")
-        print(f"Connect to WiFi: {WIFI_SSID}")
-        print(f"Then visit: http://ferda.local or http://{wifi.radio.ipv4_address_ap}")
-        
-        while True:
-            # Perform logging regardless of network state
-            self.log_periodically()  # Check if it's time to log
+        print("Server running!")
+        print(f"WiFi: {self.settings['wifi_ssid']}")
+        print(f"URL: http://ferda.local or http://{wifi.radio.ipv4_address_ap}")
 
-            # Handle network requests (non-blocking)
+        while True:
+            self.log_periodically()
             try:
                 conn, addr = self.server.accept()
                 try:
                     request = bytearray(1024)
-                    bytes_received = conn.recv_into(request)
-                    if bytes_received > 0:
-                        request_str = request[:bytes_received].decode("utf-8")
-                        self.handle_request(conn, request_str)
+                    n = conn.recv_into(request)
+                    if n > 0:
+                        self.handle_request(conn, request[:n].decode("utf-8"))
                 finally:
                     conn.close()
             except OSError as e:
-                # Handle non-blocking accept exception
-                pass  # No connection is pending, move on
-            # Short sleep to yield control and prevent CPU hogging
+                if e.args[0] not in (errno.EAGAIN, errno.ECONNRESET):
+                    print("Socket error:", e)
             time.sleep(0.01)
 
-# Configuration
-WIFI_SSID = "FERDA_AP"
-WIFI_PASSWORD = "strong_password"
-HTTP_PORT = 80
 
-# Start the server
-server = SimpleServer()
+logger.initialize_log_file()
+settings = load_settings()
+server = SimpleServer(settings)
 server.run()

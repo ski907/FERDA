@@ -1,0 +1,11 @@
+{
+  "wifi_ssid": "FERDA_AP",
+  "wifi_password": "strong_password",
+  "sensor_to_flange_mm": 100,
+  "cap_distance_mm": 30,
+  "range_offset_mm": 0,
+  "ice_thickness_cm": 0,
+  "expected_freeboard_mm": 0,
+  "alarm_threshold_mm": 20,
+  "log_interval_sec": 5
+}

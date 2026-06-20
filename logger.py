@@ -1,73 +1,128 @@
 import time
 import json
+import os
 import board
 import analogio
 import busio
 import adafruit_vl53l0x
 
-LOG_FILE = "/log_data.json"
+LOG_FILE = "/log_data.jsonl"
+OLD_LOG_FILE = "/log_data.json"
+LOG_SIZE_LIMIT = 50000  # bytes; ~500 entries at ~100 bytes each (~41 hrs at 5 s)
 
-def initialize_log_file():
-    """Ensures the log file exists and is initialized as a JSON array."""
-    try:
-        # Try to open the file to check if it exists
-        with open(LOG_FILE, "r") as f:
-            pass
-    except OSError:
-        # If the file does not exist, create and initialize it
-        with open(LOG_FILE, "w") as f:
-            json.dump([], f)
-
-def log_data(data):
-    """Appends a data entry to the JSON log file."""
-    with open(LOG_FILE, "r+") as f:
-        # Load existing data
-        log = json.load(f)
-        
-        # Add the new data entry
-        log.append(data)
-        
-        # Write updated data back to the start of the file
-        f.seek(0)
-        json.dump(log, f)
-        f.flush()  # Ensure data is written to the file
-
-# Setup for I2C and rangefinder sensor
 i2c = busio.I2C(board.SCL, board.SDA)
 vl53 = adafruit_vl53l0x.VL53L0X(i2c)
 
-# Define a constant for freeboard calculation (to be set during calibration later)
-FREEBOARD_CONSTANT = 300  # Replace 300 with your calibration constant as needed
+
+def initialize_log_file():
+    _migrate_old_log()
+    try:
+        os.stat(LOG_FILE)
+    except OSError:
+        with open(LOG_FILE, "w") as f:
+            pass
+
+
+def _migrate_old_log():
+    try:
+        os.stat(OLD_LOG_FILE)
+    except OSError:
+        return
+    try:
+        with open(OLD_LOG_FILE, "r") as f:
+            old_data = json.load(f)
+        with open(LOG_FILE, "w") as f:
+            for entry in old_data:
+                f.write(json.dumps(entry) + "\n")
+        os.remove(OLD_LOG_FILE)
+        print("Migrated log_data.json -> log_data.jsonl")
+    except Exception as e:
+        print("Migration error:", e)
+
+
+def _rotate_log():
+    """Stream through the log, discard the oldest half, write remainder to a temp file."""
+    tmp = LOG_FILE + ".tmp"
+    count = 0
+    try:
+        with open(LOG_FILE, "r") as f:
+            for line in f:
+                if line.strip():
+                    count += 1
+    except OSError:
+        return
+
+    skip = count // 2
+    seen = 0
+    try:
+        with open(tmp, "w") as out:
+            with open(LOG_FILE, "r") as f:
+                for line in f:
+                    if line.strip():
+                        if seen >= skip:
+                            out.write(line)
+                        seen += 1
+        os.remove(LOG_FILE)
+        os.rename(tmp, LOG_FILE)
+        print(f"Log rotated: kept {count - skip} entries")
+    except Exception as e:
+        print("Rotation error:", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def log_data(entry):
+    try:
+        if os.stat(LOG_FILE)[6] > LOG_SIZE_LIMIT:
+            _rotate_log()
+    except OSError:
+        pass
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def read_last_entries(n=60):
+    """Read last N entries without loading the whole file into memory at once."""
+    window = []
+    try:
+        with open(LOG_FILE, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    if len(window) >= n:
+                        window.pop(0)
+                    window.append(line)
+    except OSError:
+        return []
+    result = []
+    for line in window:
+        try:
+            result.append(json.loads(line))
+        except Exception:
+            pass
+    return result
+
 
 def measure_range():
-    """Measures distance using the VL53L0X sensor."""
-    return vl53.range  # Returns distance in millimeters
+    return vl53.range
+
 
 def get_battery_voltage():
-    """Measures battery voltage."""
-    # Setup the analog input pin connected to the battery monitor
-    battery_pin = analogio.AnalogIn(board.VOLTAGE_MONITOR)  # Replace with your actual board pin
-    measured_voltage = battery_pin.value * 3.3 / 65535  # Scale ADC reading to voltage
-    measured_voltage *= 2  # Adjust for the voltage divider (if you’re using one)
-    battery_pin.deinit()  # Deinitialize after reading to save power
-    return round(measured_voltage, 2)  # Round to 2 decimal places for display
+    pin = analogio.AnalogIn(board.VOLTAGE_MONITOR)
+    v = pin.value * 3.3 / 65535 * 2
+    pin.deinit()
+    return round(v, 2)
 
-def collect_sensor_data():
-    """Collects actual sensor data from the VL53L0X rangefinder and battery monitor."""
-    
-    # Measure range using the VL53L0X sensor
-    range_val = measure_range()
-    
-    # Measure battery voltage
-    battery_val = get_battery_voltage()
-    
-    # Calculate freeboard based on the constant and range measurement
-    freeboard_val = FREEBOARD_CONSTANT - range_val  # Adjust as necessary for calibration
-    
-    # Create a data entry with a timestamp
+
+def collect_sensor_data(settings):
+    raw = measure_range()
+    battery = get_battery_voltage()
+    freeboard = raw - settings.get("range_offset_mm", 0) - settings.get("sensor_to_flange_mm", 0)
     return {
         "timestamp": time.time(),
-        "range": range_val,
-        "battery": battery_val,
-        "freeboard": freeboard_val
+        "range": raw,
+        "battery": battery,
+        "freeboard": round(freeboard, 1)
     }

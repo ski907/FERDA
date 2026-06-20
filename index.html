@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FERDA Monitor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee; }
+        .container { max-width: 800px; margin: 0 auto; padding: 10px; }
+        h1 { font-size: 1.4em; padding: 10px 0 8px; color: #64b5f6; letter-spacing: 3px; }
+
+        /* Tabs */
+        .tabs { display: flex; gap: 3px; margin-bottom: 12px; border-bottom: 2px solid #0f3460; padding-bottom: 0; }
+        .tab-btn {
+            padding: 8px 18px; border: none; background: #16213e;
+            color: #888; cursor: pointer; font-size: 14px; border-radius: 4px 4px 0 0;
+        }
+        .tab-btn.active { background: #0f3460; color: #64b5f6; font-weight: bold; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Monitor */
+        .alarm-banner {
+            background: #c62828; color: #fff; text-align: center;
+            font-size: 1.1em; font-weight: bold; padding: 12px;
+            border-radius: 4px; margin-bottom: 10px; display: none;
+            letter-spacing: 1px;
+        }
+        .metric-row { display: flex; gap: 8px; margin-bottom: 10px; }
+        .metric {
+            background: #16213e; border-radius: 6px; padding: 12px;
+            text-align: center; flex: 1;
+        }
+        .metric.primary { flex: 2; }
+        .metric .lbl { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+        .metric .val { font-size: 2em; font-weight: bold; color: #64b5f6; margin: 4px 0 2px; }
+        .metric.primary .val { font-size: 2.8em; }
+        .metric .sub { font-size: 11px; color: #555; min-height: 14px; }
+        .val.ok     { color: #4caf50; }
+        .val.warn   { color: #ff9800; }
+        .val.danger { color: #f44336; }
+        .chart-lbl { font-size: 11px; color: #555; margin: 6px 0 2px; }
+        canvas { width: 100%; height: 150px; background: #16213e; border-radius: 4px; display: block; }
+        .last-update { font-size: 11px; color: #333; text-align: right; margin-top: 6px; }
+
+        /* Setup */
+        .step-card {
+            background: #16213e; border-radius: 6px; padding: 16px;
+            margin-bottom: 10px; border-left: 3px solid #1a3a6e;
+        }
+        .step-card.active-step { border-left-color: #64b5f6; }
+        .step-card h3 { color: #64b5f6; font-size: 0.95em; margin-bottom: 6px; }
+        .step-card p { color: #888; font-size: 13px; margin-bottom: 12px; line-height: 1.5; }
+        .verify-row {
+            display: flex; justify-content: space-between;
+            padding: 7px 0; border-bottom: 1px solid #0f3460; font-size: 13px;
+        }
+        .verify-row .vval { color: #64b5f6; font-weight: bold; }
+        .verify-status { margin-top: 12px; font-weight: bold; font-size: 1.05em; }
+
+        /* Shared form elements */
+        label { display: block; margin-bottom: 10px; font-size: 13px; color: #999; }
+        label span { display: block; margin-bottom: 3px; }
+        input[type="number"], input[type="text"], input[type="password"] {
+            width: 100%; padding: 8px 10px; background: #0f3460;
+            border: 1px solid #1e3a6e; border-radius: 4px;
+            color: #eee; font-size: 14px;
+        }
+        button {
+            padding: 9px 20px; background: #1565c0; color: #fff;
+            border: none; border-radius: 4px; cursor: pointer; font-size: 14px; margin-top: 4px;
+        }
+        button:hover { background: #1976d2; }
+        .result {
+            margin-top: 10px; padding: 10px 12px;
+            border-radius: 4px; font-size: 13px; display: none;
+        }
+        .result.ok    { background: #1b5e20; color: #a5d6a7; display: block; }
+        .result.warn  { background: #4a3000; color: #ffcc80; display: block; }
+        .result.error { background: #4a0000; color: #ef9a9a; display: block; }
+
+        /* Settings */
+        .settings-section {
+            background: #16213e; border-radius: 6px; padding: 16px; margin-bottom: 10px;
+        }
+        .settings-section h3 { color: #64b5f6; font-size: 0.95em; margin-bottom: 12px; }
+        .hint { font-size: 11px; color: #444; margin-top: -6px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>FERDA</h1>
+
+    <div class="tabs">
+        <button class="tab-btn active" onclick="showTab('monitor', this)">Monitor</button>
+        <button class="tab-btn" onclick="showTab('setup', this)">Setup</button>
+        <button class="tab-btn" onclick="showTab('settings', this)">Settings</button>
+    </div>
+
+    <!-- ── Monitor ── -->
+    <div id="tab-monitor" class="tab-content active">
+        <div class="alarm-banner" id="alarmBanner">&#9888; LOW FREEBOARD — CHECK ICE</div>
+
+        <div class="metric-row">
+            <div class="metric primary">
+                <div class="lbl">Freeboard</div>
+                <div class="val" id="currentFreeboard">--</div>
+                <div class="sub" id="freeboardSub"></div>
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;gap:8px">
+                <div class="metric">
+                    <div class="lbl">Range</div>
+                    <div class="val" id="currentRange" style="font-size:1.4em">--</div>
+                    <div class="sub">mm</div>
+                </div>
+                <div class="metric">
+                    <div class="lbl">Battery</div>
+                    <div class="val" id="currentBattery" style="font-size:1.4em">--</div>
+                    <div class="sub">V</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-lbl">Freeboard (mm)</div>
+        <canvas id="freeboardChart"></canvas>
+        <div class="chart-lbl">Range (mm)</div>
+        <canvas id="rangeChart"></canvas>
+        <div class="chart-lbl">Battery (V)</div>
+        <canvas id="batteryChart"></canvas>
+        <div class="last-update" id="lastUpdate"></div>
+    </div>
+
+    <!-- ── Setup ── -->
+    <div id="tab-setup" class="tab-content">
+
+        <div class="step-card active-step" id="step1">
+            <h3>Step 1 — Sensor Calibration</h3>
+            <p>Attach the calibration cap to the sensor end. Enter the known internal length of the cap, then click Calibrate. This corrects for any sensor offset.</p>
+            <label><span>Cap distance (mm)</span><input type="number" id="capDistance" value="30"></label>
+            <button onclick="doCalibrate()">Calibrate Sensor</button>
+            <div class="result" id="calResult"></div>
+        </div>
+
+        <div class="step-card" id="step2">
+            <h3>Step 2 — Ice Thickness</h3>
+            <p>Remove the calibration cap. Measure ice thickness with a tape through the auger hole and enter it below. Expected initial freeboard = ice thickness &times; 8.3%.</p>
+            <label><span>Ice thickness (cm)</span><input type="number" id="iceThickness" placeholder="e.g. 45"></label>
+            <button onclick="doSetIce()">Calculate &amp; Save</button>
+            <div class="result" id="iceResult"></div>
+        </div>
+
+        <div class="step-card" id="step3" style="display:none">
+            <h3>Step 3 — Install &amp; Verify</h3>
+            <p>Install the sensor through the ice with the flange seated flush on the surface. Then click Verify to compare the measured freeboard against the expected value.</p>
+            <button onclick="doVerify()">Verify Installation</button>
+            <div id="verifyResult" style="margin-top:10px"></div>
+        </div>
+
+    </div>
+
+    <!-- ── Settings ── -->
+    <div id="tab-settings" class="tab-content">
+
+        <div class="settings-section">
+            <h3>Sensor</h3>
+            <label><span>Sensor to flange distance (mm)</span><input type="number" id="sensorToFlange"></label>
+            <label><span>Alarm threshold (mm)</span><input type="number" id="alarmThreshold"></label>
+            <label><span>Log interval (sec)</span><input type="number" id="logInterval"></label>
+        </div>
+
+        <div class="settings-section">
+            <h3>WiFi</h3>
+            <p class="hint">Power cycle the device after saving WiFi changes.</p>
+            <label><span>SSID</span><input type="text" id="wifiSsid"></label>
+            <label><span>Password</span><input type="password" id="wifiPassword" placeholder="(leave blank to keep current)"></label>
+        </div>
+
+        <button onclick="saveSettings()">Save Settings</button>
+        <div class="result" id="settingsResult"></div>
+    </div>
+</div>
+<script src="monitor.js"></script>
+</body>
+</html>
